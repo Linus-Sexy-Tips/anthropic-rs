@@ -15,7 +15,7 @@ fn extend_messages(messages: &mut Vec<Message>, event: &MessagesStreamEvent) {
         }
         MessagesStreamEvent::ContentBlockDelta { index, delta } => {
             match (messages.last_mut().unwrap().content.get_mut(*index), delta) {
-                (Some(ContentBlock::Text { text }), ContentBlockDelta::TextDelta { text: delta }) => *text += delta,
+                (Some(ContentBlock::Text { text, .. }), ContentBlockDelta::TextDelta { text: delta }) => *text += delta,
                 _ => unreachable!("This should currently never happen"),
             }
         }
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cfg = AnthropicConfig::new()?;
     let client = Client::try_from(cfg)?;
     let mut messages =
-        vec![Message { role: Role::User, content: vec![ContentBlock::Text { text: "Say hello world".into() }] }];
+        vec![Message { role: Role::User, content: vec![ContentBlock::Text { text: "Say hello world".into(), citations: None }] }];
 
     let messages_request = MessagesRequestBuilder::default()
         .messages(messages.clone())

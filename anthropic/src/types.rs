@@ -59,8 +59,20 @@ pub enum ImageSource {
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ContentBlock {
-    Text { text: String },
-    Image { source: ImageSource },
+    Text {
+        text: String,
+        /// Sources cited by this text (e.g. web search results), kept as raw JSON so they
+        /// round-trip.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        citations: Option<Vec<serde_json::Value>>,
+    },
+    Image {
+        source: ImageSource,
+    },
+    /// Any other block (`thinking`, `server_tool_use`, `web_search_tool_result`, ...), kept
+    /// verbatim so it can be sent back unchanged, e.g. to continue a `pause_turn` response.
+    #[serde(untagged)]
+    Other(serde_json::Value),
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Builder, PartialEq, Eq)]
@@ -112,6 +124,9 @@ pub struct MessagesRequest {
     /// Recommended for advanced use cases only. You usually only need to use temperature.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<usize>,
+    /// Tools the model may use, e.g. server tools like web search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 /// Reason for stopping the response generation.
@@ -124,6 +139,17 @@ pub enum StopReason {
     MaxTokens,
     /// One of the provided custom stop_sequences was generated.
     StopSequence,
+    /// The model invoked one or more client tools.
+    ToolUse,
+    /// A long-running turn with server tools was paused; send the response back as-is to continue.
+    PauseTurn,
+    /// The model declined to respond.
+    Refusal,
+    /// The model's context window was exhausted.
+    ModelContextWindowExceeded,
+    /// A stop reason this crate doesn't know about yet.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Billing and rate-limit usage.
@@ -253,5 +279,71 @@ pub struct StreamError {
 impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("Error ({}): {}", self.error_type, self.message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn server_tool_blocks_parse_and_round_trip_verbatim() {
+        let content = json!([
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "text", "text": "Let me search."},
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "rust"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                {"type": "web_search_result", "url": "https://www.rust-lang.org/", "title": "Rust",
+                 "encrypted_content": "abc", "page_age": null}
+            ]},
+            {"type": "text", "text": "Rust is a language.", "citations": [
+                {"type": "web_search_result_location", "url": "https://www.rust-lang.org/", "title": "Rust",
+                 "encrypted_index": "def", "cited_text": "Rust is a language"}
+            ]}
+        ]);
+        let response: MessagesResponse = serde_json::from_value(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+            "model": "claude-sonnet-5-5",
+            "stop_reason": "pause_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 1, "server_tool_use": {"web_search_requests": 1}}
+        }))
+        .unwrap();
+
+        assert_eq!(response.stop_reason, Some(StopReason::PauseTurn));
+        assert_eq!(response.content[1], ContentBlock::Text { text: "Let me search.".into(), citations: None });
+        assert!(matches!(&response.content[2], ContentBlock::Other(block) if block["type"] == "server_tool_use"));
+        assert!(matches!(&response.content[4], ContentBlock::Text { citations: Some(c), .. } if c.len() == 1));
+
+        // Continuing a paused turn requires sending the blocks back unchanged.
+        assert_eq!(serde_json::to_value(&response.content).unwrap(), content);
+    }
+
+    #[test]
+    fn tools_are_only_sent_when_set() {
+        let request = MessagesRequestBuilder::default().build().unwrap();
+        assert!(serde_json::to_value(&request).unwrap().get("tools").is_none());
+
+        let tool = json!({"type": "web_search_20250305", "name": "web_search"});
+        let request = MessagesRequestBuilder::default().tools(vec![tool.clone()]).build().unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap()["tools"], json!([tool]));
+    }
+
+    #[test]
+    fn new_and_unknown_stop_reasons_parse() {
+        for (raw, expected) in [
+            ("tool_use", StopReason::ToolUse),
+            ("pause_turn", StopReason::PauseTurn),
+            ("refusal", StopReason::Refusal),
+            ("model_context_window_exceeded", StopReason::ModelContextWindowExceeded),
+            ("some_future_reason", StopReason::Unknown),
+        ] {
+            assert_eq!(serde_json::from_value::<StopReason>(json!(raw)).unwrap(), expected);
+        }
     }
 }

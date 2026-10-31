@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let client = Client::try_from(cfg)?;
 
     let messages =
-        vec![Message { role: Role::User, content: vec![ContentBlock::Text { text: "Say hello world".into() }] }];
+        vec![Message { role: Role::User, content: vec![ContentBlock::Text { text: "Say hello world".into(), citations: None }] }];
 
     let messages_request = MessagesRequestBuilder::default()
         .messages(messages.clone())
